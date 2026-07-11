@@ -146,10 +146,29 @@ void mio0_encode_header(unsigned char *buf, const mio0_header_t *head)
    write_u32_be(&buf[12], head->uncomp_offset);
 }
 
+/* G-Diffuser port hook: on real N64 hardware MIO0 assets were pulled in via
+   async PI DMA while other RSP/CPU threads kept running; this port's
+   cooperative fiber scheduler instead runs mio0_decode() inline, synchronously,
+   on whichever thread calls it -- for course/venue texture segments that is
+   the GAME thread (see port/n64_gfx_bridge.cpp EnsureAssetSegmentImage). A
+   single decode of a multi-hundred-KB texture can run tens of thousands of
+   loop iterations back-to-back with no scheduling point in between, which
+   starves every other cooperative fiber (notably the AUDIO thread) for the
+   whole duration -- measured as AI buffer underrun gaps during course loads.
+   gdx_yield() (port/n64_sched.c) re-enqueues the calling thread as runnable
+   and hands control back to the host frame pump, which lets other runnable
+   fibers advance before re-dispatching here; it safely no-ops when called
+   outside a fiber context. Declared extern (not via a header) so this file
+   stays a plain, standalone MIO0 codec -- it is only ever compiled into the
+   G-Diffuser executable target (see port/CMakeLists.txt), which also links
+   n64_sched.c's real gdx_yield(). */
+extern void gdx_yield(void);
+
 int mio0_decode(const unsigned char *in, unsigned char *out, unsigned int *end)
 {
    mio0_header_t head;
    unsigned int bytes_written = 0;
+   unsigned int yield_counter = 0;
    int bit_idx = 0;
    int comp_idx = 0;
    int uncomp_idx = 0;
@@ -184,6 +203,13 @@ int mio0_decode(const unsigned char *in, unsigned char *out, unsigned int *end)
          }
       }
       bit_idx++;
+
+      // Cooperative yield every 4096 iterations (~a few KB of output) so a
+      // large decompress doesn't monopolize the game fiber -- see the header
+      // comment on gdx_yield() above.
+      if ((++yield_counter & 0xFFFu) == 0u) {
+         gdx_yield();
+      }
    }
 
    if (end) {
