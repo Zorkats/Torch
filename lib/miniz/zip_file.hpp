@@ -5506,6 +5506,12 @@ public:
         writestr(arcname, bytes);
     }
 
+    // Explicitly pinned deflate level for reproducible O2R output. The level (and the
+    // vendored miniz deflate implementation) fully determines the compressed byte stream;
+    // pinning it to a fixed value keeps archives byte-identical across builds. Do not
+    // change to MZ_DEFAULT_COMPRESSION, which is environment/implementation dependent.
+    #define GDX_O2R_DEFLATE_LEVEL MZ_BEST_COMPRESSION
+
     void writestr(const std::string &arcname, const std::string &bytes)
     {
         if(archive_->m_zip_mode != MZ_ZIP_MODE_WRITING)
@@ -5513,7 +5519,7 @@ public:
             start_write();
         }
 
-        if(!mz_zip_writer_add_mem(archive_.get(), arcname.c_str(), bytes.data(), bytes.size(), MZ_BEST_COMPRESSION))
+        if(!mz_zip_writer_add_mem(archive_.get(), arcname.c_str(), bytes.data(), bytes.size(), GDX_O2R_DEFLATE_LEVEL))
         {
             throw std::runtime_error("write error");
         }
@@ -5526,7 +5532,7 @@ public:
             start_write();
         }
 
-        if(!mz_zip_writer_add_mem(archive_.get(), arcname.c_str(), bytes.data(), bytes.size(), MZ_BEST_COMPRESSION))
+        if(!mz_zip_writer_add_mem(archive_.get(), arcname.c_str(), bytes.data(), bytes.size(), GDX_O2R_DEFLATE_LEVEL))
         {
             throw std::runtime_error("write error");
         }
@@ -5702,6 +5708,7 @@ private:
         result.file_size = static_cast<std::size_t>(stat.m_uncomp_size);
         result.header_offset = static_cast<std::size_t>(stat.m_local_header_ofs);
         result.crc = stat.m_crc32;
+#ifndef MINIZ_NO_TIME
         auto time = detail::safe_localtime(stat.m_time);
         result.date_time.year = 1900 + time.tm_year;
         result.date_time.month = 1 + time.tm_mon;
@@ -5709,6 +5716,16 @@ private:
         result.date_time.hours = time.tm_hour;
         result.date_time.minutes = time.tm_min;
         result.date_time.seconds = time.tm_sec;
+#else
+        // MINIZ_NO_TIME removes m_time from mz_zip_archive_file_stat; report the
+        // zip epoch so reader-side info stays well-defined under deterministic builds.
+        result.date_time.year = 1980;
+        result.date_time.month = 1;
+        result.date_time.day = 1;
+        result.date_time.hours = 0;
+        result.date_time.minutes = 0;
+        result.date_time.seconds = 0;
+#endif
         result.flag_bits = stat.m_bit_flag;
         result.internal_attr = stat.m_internal_attr;
         result.external_attr = stat.m_external_attr;

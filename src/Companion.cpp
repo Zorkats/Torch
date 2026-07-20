@@ -389,8 +389,13 @@ void Companion::ParseCurrentFileConfig(YAML::Node node, std::atomic<size_t>& ass
             for (size_t i = 0; i < externalFiles.size(); i++) {
                 auto externalFile = externalFiles[i];
                 if (externalFile.size() == 0) {
+                    // GDX determinism: key cross-file lookups by the same canonical form the main
+                    // walk uses (generic_string / forward slashes). gCurrentExternalFiles entries
+                    // are matched against gAddrMap keys in GetNodeByAddr; a backslash spelling here
+                    // misses on Windows, leaving external symbols unresolved and emitting different
+                    // display-list bytes than Linux.
                     this->gCurrentExternalFiles.push_back(
-                        (this->gSourceDirectory / externalFile.as<std::string>()).string());
+                        (this->gSourceDirectory / externalFile.as<std::string>()).lexically_normal().generic_string());
                 } else {
                     SPDLOG_INFO("External File size {}", externalFile.size());
                     throw std::runtime_error(
@@ -398,9 +403,18 @@ void Companion::ParseCurrentFileConfig(YAML::Node node, std::atomic<size_t>& ass
                         " - <external_files>\n\ne.g.:\nexternal_files:\n  - actors/actor1.yaml");
                 }
 
-                std::string externalFileName = (this->gSourceDirectory / externalFile.as<std::string>()).string();
-                if (StringHelper::StartsWith(std::filesystem::relative(externalFileName, this->gAssetPath).string(),
-                                             "../")) {
+                // GDX determinism fix: the file-identity keys gProcessedFiles and gAddrMap are keyed
+                // by the MAIN WALK's canonical form, which is entry.path().generic_string() (forward
+                // slashes) — see ProcessAssets/getRecursiveEntries. Building externalFileName with
+                // make_preferred() produces backslashes on Windows, so it never matches the walk's
+                // forward-slash keys: externally-referenced yamls were processed TWICE there
+                // (duplicate archive records) while Linux deduped correctly. generic_string() gives
+                // the SAME canonical string as the walk, so the dedup guard fires on both platforms.
+                std::string externalFileName =
+                    (this->gSourceDirectory / externalFile.as<std::string>()).lexically_normal().generic_string();
+                if (StringHelper::StartsWith(
+                        std::filesystem::relative(externalFileName, this->gAssetPath).generic_string(),
+                        "../")) {
                     throw std::runtime_error("External File " + externalFileName + " Not In Asset Directory " +
                                              this->gAssetPath);
                 } else if (std::filesystem::relative(externalFileName, this->gAssetPath).string() == "") {
@@ -1159,7 +1173,10 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
             this->gConfig.segment.global[i + 1] = segments[i];
         }
     }
-    this->gAssetPath = (this->gSourceDirectory / rom["path"].as<std::string>()).string();
+    // GDX determinism: canonical separators (see getRecursiveEntries) so relative() computations
+    // and file-identity keys agree across every producer on Windows.
+    this->gAssetPath =
+        (this->gSourceDirectory / rom["path"].as<std::string>()).lexically_normal().make_preferred().string();
     auto opath = cfg["output"];
     auto gbi = cfg["gbi"];
     auto gbi_floats = cfg["gbi_floats"];

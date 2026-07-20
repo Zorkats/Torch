@@ -159,10 +159,16 @@ void mio0_encode_header(unsigned char *buf, const mio0_header_t *head)
    and hands control back to the host frame pump, which lets other runnable
    fibers advance before re-dispatching here; it safely no-ops when called
    outside a fiber context. Declared extern (not via a header) so this file
-   stays a plain, standalone MIO0 codec -- it is only ever compiled into the
-   G-Diffuser executable target (see port/CMakeLists.txt), which also links
-   n64_sched.c's real gdx_yield(). */
+   stays a plain, standalone MIO0 codec. Two targets compile this file: the
+   G-Diffuser executable (links n64_sched.c's real gdx_yield) and the
+   standalone gdx-extract companion, which has no fiber scheduler and builds
+   with GDX_MIO0_NO_YIELD to compile the hook out. */
+#ifndef GDX_MIO0_NO_YIELD
 extern void gdx_yield(void);
+#define MIO0_YIELD() gdx_yield()
+#else
+#define MIO0_YIELD() ((void) 0)
+#endif
 
 int mio0_decode(const unsigned char *in, unsigned char *out, unsigned int *end)
 {
@@ -208,7 +214,7 @@ int mio0_decode(const unsigned char *in, unsigned char *out, unsigned int *end)
       // large decompress doesn't monopolize the game fiber -- see the header
       // comment on gdx_yield() above.
       if ((++yield_counter & 0xFFFu) == 0u) {
-         gdx_yield();
+         MIO0_YIELD();
       }
    }
 

@@ -201,6 +201,15 @@ int main(int argc, char* argv[]) {
     } catch (const CLI::ParseError& e) {
         std::cout << app.help() << std::endl;
         return app.exit(e);
+    } catch (const std::exception& e) {
+        // Asset-processing exceptions escape the parse_complete_callbacks through app.parse().
+        // Without this handler they escalate to an opaque fail-fast (0xC0000409 on MSVC) with no
+        // message — report the reason and exit nonzero so callers (gdx_extract_launch) can log it.
+        std::cerr << "FATAL: " << e.what() << std::endl;
+        return 3;
+    } catch (...) {
+        std::cerr << "FATAL: unknown exception during extraction" << std::endl;
+        return 3;
     }
 
     // No arguments --> display help.

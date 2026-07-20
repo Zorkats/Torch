@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Opt the standalone extractor into Windows long-path support (paths > 260 chars).
+     Effective on Windows 10 1607+ when the LongPathsEnabled policy is on; harmless otherwise.
+     Added for G-Diffuser: the recipe tree's longest filename can exceed MAX_PATH when the
+     game is installed under a deep directory (verified failure at exactly 260 chars). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2:longPathAware>true</ws2:longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>

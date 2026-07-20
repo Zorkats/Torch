@@ -12,6 +12,22 @@ option(USE_STANDALONE "Build as a standalone executable" ON)
 option(BUILD_STORMLIB "Build with StormLib support" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 
+# GDX (G-Diffuser) determinism: when ON, produce byte-reproducible O2R archives.
+#  - MINIZ_NO_TIME: miniz stamps a fixed 1979/1980 DOS date instead of wall-clock time.
+#  - Pinned deflate level and sorted entry walk live in the C++ sources.
+#  - Also switches the standalone Windows CRT to static (/MT) so the extractor ships
+#    self-contained (matches the G-Diffuser executable, no VC++ redist dependency).
+option(GDX_DETERMINISTIC "Deterministic, reproducible O2R output for G-Diffuser" OFF)
+
+# Optional override for the produced executable name (e.g. "gdx-extract").
+set(GDX_OUTPUT_NAME "" CACHE STRING "Override the standalone executable output name")
+
+if(GDX_DETERMINISTIC)
+    # GDX_MIO0_NO_YIELD: the standalone extractor has no fiber scheduler, so compile
+    # out libmio0's cooperative gdx_yield() hook (defined only in the game executable).
+    add_compile_definitions(MINIZ_NO_TIME GDX_DETERMINISTIC GDX_MIO0_NO_YIELD)
+endif()
+
 option(BUILD_SM64 "Build with Super Mario 64 support" ON)
 option(BUILD_MK64 "Build with Mario Kart 64 support" ON)
 option(BUILD_SF64 "Build with Star Fox 64 support" ON)
@@ -124,7 +140,24 @@ endif()
 if (USE_STANDALONE)
     add_definitions(-DSTANDALONE)
     add_executable(${PROJECT_NAME} ${SRC_DIR})
-	set(LINK_TYPE "MD")
+    if(MSVC)
+        # Long-path awareness for the extractor: the recipe tree's longest filename can push
+        # the full path past MAX_PATH under deep install directories (verified at 260 chars).
+        # CMake merges .manifest sources into the embedded manifest automatically.
+        target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gdx_longpath.manifest)
+    endif()
+	# GDX determinism builds a redistributable, self-contained extractor: use the
+	# static CRT (/MT) so it matches the G-Diffuser executable and needs no VC++ redist.
+	# This agrees with CMAKE_MSVC_RUNTIME_LIBRARY (MultiThreaded) set below; honoring
+	# that property requires policy CMP0091=NEW, which the superbuild passes in.
+	if(GDX_DETERMINISTIC)
+		set(LINK_TYPE "MT")
+	else()
+		set(LINK_TYPE "MD")
+	endif()
+    if(GDX_OUTPUT_NAME)
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${GDX_OUTPUT_NAME}")
+    endif()
 else()
     add_library(${PROJECT_NAME} STATIC ${SRC_DIR})
 	set(LINK_TYPE "MT")
@@ -287,4 +320,11 @@ if(NOT USE_STANDALONE)
     target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/lib)
     target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_include_directories(${PROJECT_NAME} PUBLIC ${yaml-cpp_SOURCE_DIR}/include)
+endif()
+
+# Install the standalone executable to <prefix>/bin so an outer superbuild can copy
+# it from a generator-agnostic location (no per-config path guessing). Honors the
+# OUTPUT_NAME override (e.g. gdx-extract). Harmless for stock standalone builds.
+if(USE_STANDALONE)
+    install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
 endif()
