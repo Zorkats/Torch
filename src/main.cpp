@@ -1,6 +1,10 @@
 #include <iostream>
+#include <sstream>
 #include "CLI11.hpp"
 #include "Companion.h"
+#include "gdx/ipl_extract.h" // G-Diffuser R3: `ipl` subcommand (64DD IPL font-block archive)
+#include "gdx/disk_extract.h" // G-Diffuser R8: `disk` subcommand (64DD EK disk-image archive)
+#include "gdx/dump_all.h" // G-Diffuser Native Dump All: `dump` subcommand
 
 #if defined(STANDALONE) && !defined(__EMSCRIPTEN__)
 
@@ -20,7 +24,9 @@ int main(int argc, char* argv[]) {
     bool debug = false;
     std::string srcdir;
     std::string destdir;
+    std::string diskManifest; // R8 Step 2: optional EK slice manifest for the `disk` subcommand
     std::vector<std::string> additionalFiles;
+    int gExitCode = 0; // process exit code driven by the `dump` subcommand
 
     app.require_subcommand();
 
@@ -58,6 +64,87 @@ int main(int argc, char* argv[]) {
         instance->SetAdditionalFiles(additionalFiles);
         instance->SetVersion(version);
         instance->Init(ExportType::Binary);
+    });
+
+    /* Extract the 64DD IPL font block into a dedicated O2R archive (G-Diffuser R3) */
+    const auto ipl = app.add_subcommand(
+        "ipl", "IPL - Extracts the 64DD IPL font block into n64ddipl.o2r\n");
+
+    ipl->add_option("<N64DDIPLROM.n64>", filename, "")->required()->check(CLI::ExistingFile);
+    ipl->add_option("-d,--destdir", destdir, "Destination directory for n64ddipl.o2r")->required();
+
+    ipl->parse_complete_callback([&] {
+        // Throw on failure so the shared handler in app.parse() reports it and returns non-zero — the
+        // runtime launcher (gdx_extract_launch) treats any non-zero exit as "no archive, raw fallback".
+        if (GdxRunIplExtract(filename, destdir) != 0) {
+            throw std::runtime_error("IPL extraction failed");
+        }
+    });
+
+    /* Pack the 64DD Expansion Kit disk image into a dedicated O2R archive (G-Diffuser R8 Step 1) */
+    const auto disk = app.add_subcommand(
+        "disk", "DISK - Packs the 64DD EK disk image into fzerox-disk.o2r\n");
+
+    disk->add_option("<disk.ndd>", filename, "")->required()->check(CLI::ExistingFile);
+    disk->add_option("-d,--destdir", destdir, "Destination directory for fzerox-disk.o2r")->required();
+    // R8 Step 2: optional EK slice manifest (port/gen/ek_slice_manifest.txt). When supplied, one
+    // verbatim ek/<symbol> entry is appended per named EK disk asset; omitted -> two disk/* entries.
+    disk->add_option("-m,--manifest", diskManifest,
+                     "Optional EK slice manifest (adds ek/<symbol> per-asset entries)")
+        ->check(CLI::ExistingFile);
+
+    disk->parse_complete_callback([&] {
+        // Same failure discipline as the ipl step: a non-zero exit tells the runtime launcher to keep
+        // the raw-disk/managed-copy fallback rather than mount a bad archive.
+        if (GdxRunDiskExtract(filename, destdir, diskManifest) != 0) {
+            throw std::runtime_error("Disk extraction failed");
+        }
+    });
+
+    /* Native Dump All: decode named game assets from the extracted archives (no game, no Python) */
+    const auto dump = app.add_subcommand(
+        "dump", "DUMP - Decodes named game assets from the extracted archives\n");
+    std::string dumpClasses;
+    std::string dumpDir;
+    std::string dumpRom, dumpArchive, dumpDiskArchive, dumpIplArchive, dumpManifest, dumpRecipes,
+        dumpEkYamlDir;
+    bool dumpListClasses = false;
+    dump->add_option("-c,--classes", dumpClasses,
+                     "Comma-separated dump classes (textures,coursedata,dlists,vertexdata,tables,"
+                     "ghosts,fonts)");
+    dump->add_option("-d,--dump-dir", dumpDir, "Output dump directory");
+    dump->add_option("--rom", dumpRom, "Optional raw baserom.z64 (archive-first when omitted)");
+    dump->add_option("-a,--archive", dumpArchive, "Cart asset archive (generic.o2r)");
+    dump->add_option("--disk-archive", dumpDiskArchive, "64DD EK disk archive (fzerox-disk.o2r)");
+    dump->add_option("--ipl-archive", dumpIplArchive, "64DD IPL archive (n64ddipl.o2r)");
+    dump->add_option("-m,--manifest", dumpManifest, "EK slice manifest (ek_slice_manifest.txt)");
+    dump->add_option("--recipes", dumpRecipes, "Recipe tree dir (decomp-recipes)");
+    dump->add_option("--ek-yaml-dir", dumpEkYamlDir,
+                     "EK asset recipe tree (fzerox-expansion-kit/assets/yaml/jp)");
+    dump->add_flag("--list-classes", dumpListClasses, "Print one class name per line and exit");
+
+    dump->parse_complete_callback([&] {
+        DumpOptions opts;
+        opts.listClasses = dumpListClasses;
+        if (!dumpClasses.empty()) {
+            std::stringstream ss(dumpClasses);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                // trim
+                std::size_t a = item.find_first_not_of(" \t");
+                std::size_t b = item.find_last_not_of(" \t");
+                if (a != std::string::npos) opts.classes.push_back(item.substr(a, b - a + 1));
+            }
+        }
+        opts.dumpDir = dumpDir;
+        opts.romPath = dumpRom;
+        opts.archivePath = dumpArchive;
+        opts.diskArchivePath = dumpDiskArchive;
+        opts.iplArchivePath = dumpIplArchive;
+        opts.manifestPath = dumpManifest;
+        opts.recipesDir = dumpRecipes;
+        opts.ekYamlDir = dumpEkYamlDir;
+        gExitCode = GdxRunDumpAll(opts);
     });
 
     /* Generate C code */
@@ -217,6 +304,6 @@ int main(int argc, char* argv[]) {
         std::cout << app.help() << std::endl;
     }
 
-    return 0;
+    return gExitCode;
 }
 #endif
