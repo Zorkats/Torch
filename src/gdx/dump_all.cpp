@@ -4,6 +4,13 @@
 #include "gdx/dump_all.h"
 #include "gdx/dump_common.h"
 
+// zip_file.hpp is a header-only amalgamation: lines 977-4945 are the miniz C implementation,
+// guarded by MINIZ_HEADER_FILE_ONLY. src/archive/ZWrapper.cpp is the one translation unit that
+// compiles that implementation; defining the macro here takes the declarations only, so the two
+// TUs do not each emit mz_* definitions (GNU ld: "multiple definition of
+// `mz_zip_extract_archive_file_to_heap'"). MSVC tolerated the duplicates, so this only ever
+// surfaced on the Linux build.
+#define MINIZ_HEADER_FILE_ONLY
 #include <miniz/zip_file.hpp>
 #include <yaml-cpp/yaml.h>
 
@@ -488,10 +495,10 @@ std::string discoverDir(const std::string& explicitPath, const std::string& base
 // The registry: name -> runner. Ordered so --list-classes prints alphabetically.
 const std::vector<std::pair<std::string, std::function<ClassResult(Context&)>>>& registry() {
     static const std::vector<std::pair<std::string, std::function<ClassResult(Context&)>>> r = {
-        {"audio", runAudio},           {"coursedata", runCourseData}, {"dlists", runDlists},
-        {"fonts", runFonts},           {"ghosts", runGhosts},         {"midi", runMidi},
-        {"models", runModels},         {"tables", runTables},         {"textures", runTextures},
-        {"vertexdata", runVertexData},
+        {"arrays", runArrays},         {"audio", runAudio},           {"coursedata", runCourseData},
+        {"dlists", runDlists},         {"fonts", runFonts},           {"ghosts", runGhosts},
+        {"midi", runMidi},             {"models", runModels},         {"tables", runTables},
+        {"textures", runTextures},     {"vertexdata", runVertexData},
     };
     return r;
 }

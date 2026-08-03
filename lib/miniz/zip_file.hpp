@@ -24,6 +24,13 @@
 
 #include <algorithm>
 #include <cstdint>
+// std::memset / std::strlen are used below. The amalgamated miniz source further down includes
+// <string.h>, which only guarantees the names in the GLOBAL namespace -- MSVC happens to pull the
+// std:: overloads in transitively, GCC 16 does not, so the Linux build failed here.
+#include <cstring>
+// assert() is used by the miniz_cpp C++ layer below. It used to arrive via the <assert.h> inside
+// the miniz implementation block, which a TU defining MINIZ_HEADER_FILE_ONLY skips entirely.
+#include <cassert>
 #include <iostream>
 #include <fstream>
 #include <limits>
@@ -4971,14 +4978,14 @@ namespace miniz_cpp {
 namespace detail {
 
 #ifdef _WIN32
-char directory_separator = '\\';
-char alt_directory_separator = '/';
+inline char directory_separator = '\\';
+inline char alt_directory_separator = '/';
 #else
-char directory_separator = '/';
-char alt_directory_separator = '\\';
+inline char directory_separator = '/';
+inline char alt_directory_separator = '\\';
 #endif
 
-std::string join_path(const std::vector<std::string> &parts)
+inline std::string join_path(const std::vector<std::string> &parts)
 {
     std::string joined;
     std::size_t i = 0;
@@ -4994,7 +5001,7 @@ std::string join_path(const std::vector<std::string> &parts)
     return joined;
 }
     
-std::vector<std::string> split_path(const std::string &path, char delim = directory_separator)
+inline std::vector<std::string> split_path(const std::string &path, char delim = directory_separator)
 {
     std::vector<std::string> split;
     std::string::size_type previous_index = 0;
@@ -5029,7 +5036,7 @@ std::vector<std::string> split_path(const std::string &path, char delim = direct
     return split;
 }
     
-uint32_t crc32buf(const char *buf, std::size_t len)
+inline uint32_t crc32buf(const char *buf, std::size_t len)
 {
     uint32_t oldcrc32 = 0xFFFFFFFF;
     
@@ -5090,7 +5097,9 @@ uint32_t crc32buf(const char *buf, std::size_t len)
     return ~oldcrc32;
 }
 
-tm safe_localtime(const time_t &t)
+// inline: this is a header-only library, so a non-inline definition here becomes a duplicate
+// symbol as soon as a second translation unit includes it (ld: multiple definition).
+inline tm safe_localtime(const time_t &t)
 {
 #ifdef _WIN32
     tm time;
@@ -5103,7 +5112,7 @@ tm safe_localtime(const time_t &t)
 #endif
 }
 
-std::size_t write_callback(void *opaque, mz_uint64 file_ofs, const void *pBuf, std::size_t n)
+inline std::size_t write_callback(void *opaque, mz_uint64 file_ofs, const void *pBuf, std::size_t n)
 {
     auto buffer = static_cast<std::vector<char> *>(opaque);
     

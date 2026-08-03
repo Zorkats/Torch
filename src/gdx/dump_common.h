@@ -18,6 +18,9 @@ constexpr std::size_t kOtrHeaderSize = 64;                       // libultraship
 constexpr std::size_t kTexSubHeaderSize = 16;                    // [texType,width,height,dataSize]
 constexpr std::size_t kTexPayloadOffset = kOtrHeaderSize + kTexSubHeaderSize; // 0x50
 constexpr std::size_t kBlobPayloadOffset = kOtrHeaderSize + 4;   // 0x44 (u32 size subheader)
+constexpr std::size_t kArraySubHeaderSize = 8;                   // [arrayType u32, count u32]
+constexpr std::size_t kArrayPayloadOffset = kOtrHeaderSize + kArraySubHeaderSize; // 0x48
+constexpr std::uint32_t kResourceTypeGenericArray = 0x47415252;  // 'GARR', Torch::ResourceType::GenericArray
 
 // ── an opened .o2r archive (read side) ───────────────────────────────────────────────────────────
 class Archive {
@@ -185,7 +188,9 @@ bool loadAudioTables(const std::string& path, AudioTables& out);
 // EK slice manifest length map (symbol -> len) for FZX:SOUNDFONT / FZX:SEQUENCE rows.
 std::map<std::string, long long> loadEkManifestLens(const std::string& manifestPath);
 
-// Class entry points (implemented in dump_textures.cpp / dump_extra.cpp / dump_audio.cpp / dump_midi.cpp).
+// Class entry points (implemented in dump_textures.cpp / dump_extra.cpp / dump_arrays.cpp /
+// dump_audio.cpp / dump_midi.cpp).
+ClassResult runArrays(Context& ctx);
 ClassResult runTextures(Context& ctx);
 ClassResult runCourseData(Context& ctx);
 ClassResult runDlists(Context& ctx);
