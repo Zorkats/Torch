@@ -18,6 +18,8 @@ int main(int argc, char* argv[]) {
     std::string folder;
     std::string archive;
     std::string version;
+    std::string configKeyOverride; // G-Diffuser: extract a modified ROM with a known dump's recipes
+    std::uint32_t versionCrcOverride = 0; // G-Diffuser: stamp the recipe tree's CRC, not the ROM's
     ArchiveType otrMode = ArchiveType::None;
     bool otrModeSelected = false;
     bool xmlMode = false;
@@ -58,11 +60,21 @@ int main(int argc, char* argv[]) {
                     "Additional files to include in the o2r archive (e.g., mods.toml)")
         ->check(CLI::ExistingFile);
     o2r->add_option("-u,--version", version, "Version to set in the o2r archive");
+    o2r->add_option("--version-crc", versionCrcOverride,
+                    "Stamp the archive version entry with this ROM CRC instead of the cartridge's own. "
+                    "Pair it with --config-key: an archive built from a hack using stock recipes is "
+                    "structurally a stock archive, and the version entry describes layout, not origin.");
+    o2r->add_option("--config-key", configKeyOverride,
+                    "Select the config.yml recipe tree by this key instead of the ROM's own hash. "
+                    "For ROM hacks, whose hash no config.yml describes. Assets the hack relocated "
+                    "will be read from the original ROM's offsets.");
 
     o2r->parse_complete_callback([&] {
         const auto instance = Companion::Instance = new Companion(filename, ArchiveType::O2R, debug, srcdir, destdir);
         instance->SetAdditionalFiles(additionalFiles);
         instance->SetVersion(version);
+        instance->SetConfigKeyOverride(configKeyOverride);
+        instance->SetVersionCrcOverride(versionCrcOverride);
         instance->Init(ExportType::Binary);
     });
 

@@ -1,6 +1,7 @@
 #include "Decompressor.h"
 #include "TorchUtils.h"
 
+#include <cstdio>
 #include <stdexcept>
 #include "spdlog/spdlog.h"
 #include <Companion.h>
@@ -10,6 +11,26 @@ extern "C" {
 #include <libyay0/yay0.h>
 #include <libyay0/yay1.h>
 #include <libmio0/tkmk00.h>
+
+namespace {
+// Recipe offsets are absolute addresses and nothing validated them. When an asset pointer landed
+// past the end of the buffer, `total - offset` underflowed (both are size_t), the "reduce to
+// available size" clamps below never fired, and a wild pointer reached the factory -- a hard crash
+// rather than a diagnosable failure. That happens on a corrupt dump, and on any ROM whose data does
+// not match the recipe tree. Throwing keeps the failure catchable and names the offset;
+// Companion::ParseNode turns it into a skipped asset instead of a dead process.
+size_t RangeFrom(size_t total, size_t offset, const char* what) {
+    if (offset > total) {
+        char msg[224];
+        std::snprintf(msg, sizeof(msg),
+                      "asset pointer 0x%llX lies past the end of the %s (0x%llX bytes); the data at this "
+                      "recipe offset is not what the recipe describes",
+                      (unsigned long long) offset, what, (unsigned long long) total);
+        throw std::runtime_error(msg);
+    }
+    return total - offset;
+}
+} // namespace
 }
 
 std::unordered_map<uint32_t, DataChunk*> gCachedChunks;
@@ -94,7 +115,7 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
         offset = ASSET_PTR(offset);
 
         auto decoded = Decode(buffer, fileOffset + offset, CompressionType::MIO0);
-        size_t decodedSize = decoded->size - offset;
+        size_t decodedSize = RangeFrom(decoded->size, offset, "decompressed asset");
         size_t size;
 
         if (node["size"]) {
@@ -127,7 +148,7 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
 
         auto assetPtr = fileOffset + offset;
         auto decoded = DecodeTKMK00(buffer, assetPtr, textureSize, alpha);
-        size_t decodedSize = decoded->size - offset;
+        size_t decodedSize = RangeFrom(decoded->size, offset, "decompressed asset");
         size_t size;
 
         if (node["size"]) {
@@ -156,7 +177,7 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
             offset = ASSET_PTR(offset);
 
             auto decoded = Decode(buffer, fileOffset, type);
-            auto availableSize = decoded->size - offset;
+            auto availableSize = RangeFrom(decoded->size, offset, "decompressed asset");
             size_t size;
 
             if (node["size"]) {
@@ -183,7 +204,7 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
         {
             fileOffset = TranslateAddr(offset, false);
 
-            auto availableSize = buffer.size() - fileOffset;
+            auto availableSize = RangeFrom(buffer.size(), fileOffset, "ROM");
             size_t size;
 
             if (node["size"]) {

@@ -193,6 +193,20 @@ public:
     void RegisterCompanionFile(const std::string path, std::vector<char> data);
     void SetAdditionalFiles(const std::vector<std::string>& files) { this->gAdditionalFiles = files; }
     void SetVersion(const std::string& version) { this->gVersion = version; }
+    // G-Diffuser: select the recipe tree by an explicit config.yml key instead of the ROM's own
+    // hash. A ROM hack hashes to something no config.yml describes, so without this the extractor
+    // refuses it outright. Only recipe SELECTION changes; the cartridge's real hash is still what
+    // is logged and recorded.
+    void SetConfigKeyOverride(const std::string& key) { this->gConfigKeyOverride = key; }
+    // Stamp the archive's `version` entry with this CRC instead of the cartridge's own. An archive
+    // built from a modified ROM with a stock recipe tree is structurally a STOCK archive, and the
+    // version entry is what consumers use to decide layout compatibility, so it has to describe the
+    // tree that produced it rather than the ROM the bytes came from. 0 means "use the cartridge".
+    void SetVersionCrcOverride(std::uint32_t crc) { this->gVersionCrcOverride = crc; }
+    // Count of assets skipped because their data did not parse. Nonzero means the archive is
+    // incomplete: whatever was skipped is simply absent, so the base game's version is used.
+    size_t GetDamagedAssetCount() const { return this->gDamagedAssets; }
+    void NoteDamagedAsset() { this->gDamagedAssets++; }
 
     void SetProcess(bool shouldProcess);
     TorchConfig& GetConfig() { return this->gConfig; }
@@ -210,6 +224,9 @@ private:
     std::string gCurrentHash;
     std::string gAssetPath;
     std::string gVersion;
+    std::string gConfigKeyOverride;
+    std::uint32_t gVersionCrcOverride = 0;
+    size_t gDamagedAssets = 0;
     std::vector<uint8_t> gRomData;
     std::optional<std::filesystem::path> gRomPath;
     bool gNodeForceProcessing = false;

@@ -87,6 +87,7 @@
 #ifdef FZERO_SUPPORT
 #include "factories/fzerox/EADAnimationFactory.h"
 #include "factories/fzerox/CourseFactory.h"
+#include "factories/fzerox/CourseStringsFactory.h"
 #include "factories/fzerox/GhostRecordFactory.h"
 #include "factories/fzerox/EADLimbFactory.h"
 #include "factories/fzerox/SequenceFactory.h"
@@ -226,6 +227,7 @@ void Companion::Init(const ExportType type, std::atomic<size_t>& assetCount) {
 #ifdef FZERO_SUPPORT
     this->RegisterFactory("FZX:ANIM", std::make_shared<FZX::EADAnimationFactory>());
     this->RegisterFactory("FZX:COURSE", std::make_shared<FZX::CourseFactory>());
+    this->RegisterFactory("FZX:COURSE_STRINGS", std::make_shared<FZX::CourseStringsFactory>());
     this->RegisterFactory("FZX:GHOST", std::make_shared<FZX::GhostRecordFactory>());
     this->RegisterFactory("FZX:LIMB", std::make_shared<FZX::EADLimbFactory>());
     this->RegisterFactory("FZX:SEQUENCE", std::make_shared<FZX::SequenceFactory>());
@@ -333,30 +335,40 @@ std::optional<ParseResultData> Companion::ParseNode(YAML::Node& node, std::strin
 
     bool executeDef = true;
     std::optional<std::shared_ptr<IParsedData>> result;
-    if (this->gConfig.modding && impl->SupportModdedAssets() && Torch::contains(this->gModdedAssetPaths, name)) {
-        auto path = fs::path(this->gConfig.moddingPath) / this->gModdedAssetPaths[name];
-        if (!exists(path)) {
-            SPDLOG_ERROR("Modded asset {} not found", this->gModdedAssetPaths[name]);
-        } else {
-            std::ifstream input(path, std::ios::binary);
-            std::vector<uint8_t> data = std::vector<uint8_t>(std::istreambuf_iterator(input), {});
-            input.close();
+    try {
+        if (this->gConfig.modding && impl->SupportModdedAssets() && Torch::contains(this->gModdedAssetPaths, name)) {
+            auto path = fs::path(this->gConfig.moddingPath) / this->gModdedAssetPaths[name];
+            if (!exists(path)) {
+                SPDLOG_ERROR("Modded asset {} not found", this->gModdedAssetPaths[name]);
+            } else {
+                std::ifstream input(path, std::ios::binary);
+                std::vector<uint8_t> data = std::vector<uint8_t>(std::istreambuf_iterator(input), {});
+                input.close();
 
-            result = impl->parse_modding(data, node);
-            executeDef = !result.has_value();
+                result = impl->parse_modding(data, node);
+                executeDef = !result.has_value();
+            }
         }
-    }
 
-    if (executeDef && this->gConfig.parseMode == ParseMode::Default) {
-        result = impl->parse(this->gRomData, node);
-    }
+        if (executeDef && this->gConfig.parseMode == ParseMode::Default) {
+            result = impl->parse(this->gRomData, node);
+        }
 
-    if (executeDef && this->gConfig.parseMode == ParseMode::Directory) {
-        auto path = GetSafeNode<std::string>(node, "path");
-        std::ifstream input(path, std::ios::binary);
-        auto data = std::vector<uint8_t>(std::istreambuf_iterator(input), {});
-        result = impl->parse(data, node);
-        input.close();
+        if (executeDef && this->gConfig.parseMode == ParseMode::Directory) {
+            auto path = GetSafeNode<std::string>(node, "path");
+            std::ifstream input(path, std::ios::binary);
+            auto data = std::vector<uint8_t>(std::istreambuf_iterator(input), {});
+            result = impl->parse(data, node);
+            input.close();
+        }
+    } catch (const std::exception& e) {
+        // A throwing factory means a damaged or unexpected asset, not a reason to abandon the whole
+        // archive. Both callers of ParseNode already treat std::nullopt as "skip this entry", so
+        // this is what lets a ROM the recipe tree only partly describes still produce an archive,
+        // with the damage counted and reported rather than ending in a crash.
+        this->NoteDamagedAsset();
+        SPDLOG_ERROR("Skipping {}: {}", name, e.what());
+        return std::nullopt;
     }
 
     if (!result.has_value()) {
@@ -1098,6 +1110,10 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
 
     bool isDirectoryMode = config["mode"] && config["mode"].as<std::string>() == "directory";
 
+    // The config.yml key this run reads its recipe tree from. Normally the cartridge's own hash;
+    // an explicit override lets a modified ROM be extracted with a known dump's recipes.
+    std::string configKey;
+
     if (!isDirectoryMode) {
         if (this->gRomPath.has_value()) {
             std::ifstream input(this->gRomPath.value(), std::ios::binary);
@@ -1108,8 +1124,15 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
         this->gCartridge = std::make_shared<N64::Cartridge>(this->gRomData);
         this->gCartridge->Initialize();
 
-        if (!config[this->gCartridge->GetHash()]) {
-            SPDLOG_ERROR("No config found for {}", this->gCartridge->GetHash());
+        configKey = this->gConfigKeyOverride.empty() ? this->gCartridge->GetHash() : this->gConfigKeyOverride;
+        if (!this->gConfigKeyOverride.empty()) {
+            SPDLOG_WARN("Recipe key overridden: ROM {} will be extracted with the recipe tree for {}. "
+                        "Any asset this ROM relocated will be read from the original ROM's offsets.",
+                        this->gCartridge->GetHash(), this->gConfigKeyOverride);
+        }
+
+        if (!config[configKey]) {
+            SPDLOG_ERROR("No config found for {}", configKey);
             return;
         }
 
@@ -1118,7 +1141,7 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
         this->gConfig.parseMode = ParseMode::Directory;
     }
 
-    auto rom = !isDirectoryMode ? config[this->gCartridge->GetHash()] : config;
+    auto rom = !isDirectoryMode ? config[configKey] : config;
 
     if (rom["preprocess"]) {
         auto preprocess = rom["preprocess"];
@@ -1145,7 +1168,11 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
                     }
 
                     if (restart) {
-                        rom = config[this->gCartridge->GetHash()];
+                        // Decompression produced a different cartridge, so re-derive the key --
+                        // unless the caller pinned one, in which case the pin still governs.
+                        configKey = this->gConfigKeyOverride.empty() ? this->gCartridge->GetHash()
+                                                                     : this->gConfigKeyOverride;
+                        rom = config[configKey];
                     }
                 } else {
                     throw std::runtime_error("Only decompression is supported");
@@ -1159,7 +1186,7 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
     auto cfg = rom["config"];
     if (!cfg) {
         SPDLOG_ERROR("No config found for {}",
-                     !isDirectoryMode ? this->gCartridge->GetHash() : GetSafeNode<std::string>(config, "folder"));
+                     !isDirectoryMode ? configKey : GetSafeNode<std::string>(config, "folder"));
         return;
     }
 
@@ -1362,7 +1389,14 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
     vWriter.Write(static_cast<uint8_t>(Torch::Endianness::Big));
 
     if (this->gConfig.parseMode == ParseMode::Default) {
-        vWriter.Write(this->gCartridge->GetCRC());
+        if (this->gVersionCrcOverride != 0) {
+            SPDLOG_WARN("Version CRC overridden: stamping 0x{:08X} instead of this cartridge's 0x{:08X}, "
+                        "because the archive was built with another ROM's recipe tree.",
+                        this->gVersionCrcOverride, this->gCartridge->GetCRC());
+            vWriter.Write(this->gVersionCrcOverride);
+        } else {
+            vWriter.Write(this->gCartridge->GetCRC());
+        }
     } else {
         vWriter.Write((uint32_t)0);
     }
@@ -1428,6 +1462,11 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
     auto end = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
     auto level = spdlog::get_level();
     spdlog::set_level(spdlog::level::info);
+    if (Companion::Instance != nullptr && Companion::Instance->GetDamagedAssetCount() > 0) {
+        SPDLOG_WARN("{} asset(s) were skipped as unreadable at their recipe offsets. This archive is "
+                    "INCOMPLETE; every skipped asset falls back to the base game's version.",
+                    Companion::Instance->GetDamagedAssetCount());
+    }
     SPDLOG_CRITICAL("Done! Took {}ms", end.count() - start.count());
     SPDLOG_CRITICAL("------------------------------------------------");
     spdlog::set_level(level);
@@ -1491,6 +1530,11 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
     }
 
     auto end = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
+    if (Companion::Instance != nullptr && Companion::Instance->GetDamagedAssetCount() > 0) {
+        SPDLOG_WARN("{} asset(s) were skipped as unreadable at their recipe offsets. This archive is "
+                    "INCOMPLETE; every skipped asset falls back to the base game's version.",
+                    Companion::Instance->GetDamagedAssetCount());
+    }
     SPDLOG_CRITICAL("Done! Took {}ms", end.count() - start.count());
     SPDLOG_CRITICAL("Exported to {}", output);
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");

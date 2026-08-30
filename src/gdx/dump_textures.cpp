@@ -14,6 +14,7 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -240,6 +241,65 @@ std::map<std::uint64_t, std::string> ekRecipeTlut(const std::string& ekYamlDir) 
     return tlutByAddr;
 }
 
+// Atlas band geometry for buffers the game loads as one tall strip and samples per-tile
+// (devdocs/POST_1_0_SCOPING.md "Per-tile atlas overrides"). key -> (tile_w, tile_h); tiles stack
+// vertically, so band i starts at byte offset i * texelBytes(fmt, tile_w * tile_h) — the offset the
+// runtime's containing-range lookup keys on. Mirrors ATLAS_TILE_GEOMETRY in tools/gen_dump_all.py.
+const std::map<std::string, std::pair<int, int>> kAtlasTileGeometry = {
+    {"machine_custom_gfx/aTimerSymbolsTex", {8, 16}},
+    {"machine_custom_gfx/aSpeedDigitsTex", {12, 16}},
+};
+
+// Emit the scheme-2 "atlas/<baseKey>/o<byteOffset>/<FMT>/<W>x<H>" rows for an atlas strip: the
+// whole-atlas key (o0 at full W×H — the band geometry whole-atlas LoadTextureBlock loads produce)
+// plus one sliced PNG + row per band. rgba is the decoded whole-atlas buffer, or empty on the
+// skipped-existing path (band PNGs were written by the run that wrote the base; rows are still
+// re-emitted because writeManifest regenerates the manifest from scratch each run).
+void emitAtlasBands(const TexItem& it, const std::string& outDir, const std::vector<std::uint8_t>& rgba,
+                    std::vector<std::vector<std::string>>& manifest, int& atlasDumped) {
+    auto git = kAtlasTileGeometry.find(it.key);
+    if (git == kAtlasTileGeometry.end()) return;
+    const int tileW = git->second.first;
+    const int tileH = git->second.second;
+    if (it.width != tileW || tileH <= 0 || it.height % tileH != 0) {
+        std::fprintf(stderr, "  warn: %s: atlas geometry %dx%d tiles do not tile %dx%d - no band rows\n",
+                     it.key.c_str(), tileW, tileH, it.width, it.height);
+        return;
+    }
+    const std::string base = "atlas/" + it.key;
+    const std::size_t bandBytes = texelBytes(it.fmt, static_cast<std::size_t>(tileW) * tileH);
+    const std::size_t rowStride = static_cast<std::size_t>(it.width) * 4;
+    const std::string pal = it.paletteKey.value_or("-");
+    struct Band {
+        std::size_t off; // byte offset within the atlas buffer (the runtime lookup key)
+        int w, h, row0;  // band dims + first source row in the decoded strip
+    };
+    // The whole-atlas key comes first, then one band per tile.
+    std::vector<Band> bands;
+    bands.push_back({0, it.width, it.height, 0});
+    const int nTiles = it.height / tileH;
+    for (int i = 0; i < nTiles; ++i) {
+        bands.push_back({static_cast<std::size_t>(i) * bandBytes, tileW, tileH, i * tileH});
+    }
+    for (const Band& b : bands) {
+        char suffix[96];
+        std::snprintf(suffix, sizeof(suffix), "/o%zu/%s/%dx%d", b.off, it.fmt.c_str(), b.w, b.h);
+        const std::string key = base + suffix;
+        manifest.push_back({key, std::to_string(b.w), std::to_string(b.h), it.fmt, pal});
+        if (rgba.empty()) continue;
+        const std::string png = joinPath(outDir, key + ".png");
+        if (fileExists(png)) continue;
+        std::vector<std::uint8_t> band(static_cast<std::size_t>(b.w) * b.h * 4);
+        for (int y = 0; y < b.h; ++y) {
+            std::memcpy(band.data() + static_cast<std::size_t>(y) * b.w * 4,
+                        rgba.data() + static_cast<std::size_t>(b.row0 + y) * rowStride,
+                        static_cast<std::size_t>(b.w) * 4);
+        }
+        makeDirs(fs::path(png).parent_path().string());
+        if (writePng(png, b.w, b.h, band.data())) ++atlasDumped;
+    }
+}
+
 } // namespace
 
 ClassResult runTextures(Context& ctx) {
@@ -252,9 +312,15 @@ ClassResult runTextures(Context& ctx) {
     // ── cart ──
     std::vector<TexItem> items = walkCartTextures(ctx.cartYamlDir);
     std::sort(items.begin(), items.end(), [](const TexItem& a, const TexItem& b) { return a.key < b.key; });
+    // Every palette a cart CI texture references (deduped): dumped below as Nx1 TLUT swatches,
+    // mirroring the EK palette dump, so the packer can quantize CI replacements offline.
+    std::set<std::string> cartPal;
+    for (const TexItem& it : items) {
+        if (it.paletteKey) cartPal.insert(*it.paletteKey);
+    }
 
-    std::vector<std::vector<std::string>> manifest; // (key, w, h, fmt) in dump order
-    int dumped = 0, skipped = 0, failed = 0;
+    std::vector<std::vector<std::string>> manifest; // (key, w, h, fmt, palette_key) in dump order
+    int dumped = 0, skipped = 0, failed = 0, atlasDumped = 0;
     for (const TexItem& it : items) {
         if (!safeOutputComponent(it.key)) {
             std::fprintf(stderr, "  warn: textures: unsafe output name '%s'; skipping\n", it.key.c_str());
@@ -264,7 +330,9 @@ ClassResult runTextures(Context& ctx) {
         std::string png = joinPath(outDir, it.key + ".png");
         if (fileExists(png)) {
             ++skipped;
-            manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt});
+            manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt,
+                                it.paletteKey.value_or("-")});
+            emitAtlasBands(it, outDir, {}, manifest, atlasDumped);
             continue;
         }
         std::vector<std::uint8_t> rgba = decodeCart(it, ctx);
@@ -279,10 +347,48 @@ ClassResult runTextures(Context& ctx) {
             continue;
         }
         ++dumped;
-        manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt});
+        manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt,
+                            it.paletteKey.value_or("-")});
+        emitAtlasBands(it, outDir, rgba, manifest, atlasDumped);
+    }
+    // ── cart TLUT swatches (mirror of the EK palette loop below) ──
+    for (const std::string& key : cartPal) {
+        if (!safeOutputComponent(key)) {
+            std::fprintf(stderr, "  warn: cart palette: unsafe output name '%s'; skipping\n", key.c_str());
+            ++failed;
+            continue;
+        }
+        std::string png = joinPath(outDir, key + ".png");
+        auto raw = ctx.cart->readStripped(key, kTexPayloadOffset);
+        int n = raw ? static_cast<int>(raw->size() / 2) : 0;
+        if (fileExists(png)) {
+            ++skipped;
+            manifest.push_back({key, std::to_string(n), "1", "TLUT", "-"});
+            continue;
+        }
+        if (!raw || n == 0) {
+            ++failed;
+            continue;
+        }
+        std::vector<std::uint8_t> rgba =
+            decodeTexel("RGBA16", raw->data(), raw->size(), n, 1, nullptr, 0);
+        if (rgba.empty()) {
+            ++failed;
+            continue;
+        }
+        makeDirs(fs::path(png).parent_path().string());
+        if (!writePng(png, n, 1, rgba.data())) {
+            ++failed;
+            continue;
+        }
+        ++dumped;
+        manifest.push_back({key, std::to_string(n), "1", "TLUT", "-"});
     }
     std::printf("  textures: %d dumped, %d skipped, %d failed (of %zu)\n", dumped, skipped, failed,
-                items.size());
+                items.size() + cartPal.size());
+    if (atlasDumped > 0) {
+        std::printf("  atlas bands: %d per-tile slice(s) written (key scheme 2)\n", atlasDumped);
+    }
     res.dumped = dumped;
     res.skipped = skipped;
     res.failed = failed;
@@ -299,7 +405,8 @@ ClassResult runTextures(Context& ctx) {
         std::printf("  ek textures: EK artifacts missing (disk archive / manifest / tlut map or recipe "
                     "tree) -- skipping EK texture dump\n");
         writeManifest(joinPath(outDir, "manifest.tsv"),
-                      "key\tnative_w\tnative_h\tn64_fmt   (one row per dumped texture)", manifest);
+                      "key\tnative_w\tnative_h\tn64_fmt\tpalette_key   (one row per dumped texture; "
+                      "palette_key = TLUT swatch key for CI4/CI8, - otherwise)", manifest);
         return res;
     }
 
@@ -353,7 +460,8 @@ ClassResult runTextures(Context& ctx) {
         std::string png = joinPath(outDir, it.key + ".png");
         if (fileExists(png)) {
             ++ekSkipped;
-            manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt});
+            manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt,
+                                it.paletteKey.value_or("-")});
             continue;
         }
         auto raw = ctx.disk->readRaw(it.key);
@@ -402,7 +510,8 @@ ClassResult runTextures(Context& ctx) {
             continue;
         }
         ++ekDumped;
-        manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt});
+        manifest.push_back({it.key, std::to_string(it.width), std::to_string(it.height), it.fmt,
+                            it.paletteKey.value_or("-")});
     }
     for (const auto& kp : ekPal) {
         const std::string& key = kp.first;
@@ -416,7 +525,7 @@ ClassResult runTextures(Context& ctx) {
         int n = raw ? static_cast<int>(raw->size() / 2) : 0;
         if (fileExists(png)) {
             ++ekSkipped;
-            manifest.push_back({key, std::to_string(n), "1", "TLUT"});
+            manifest.push_back({key, std::to_string(n), "1", "TLUT", "-"});
             continue;
         }
         if (!raw || n == 0) {
@@ -435,13 +544,14 @@ ClassResult runTextures(Context& ctx) {
             continue;
         }
         ++ekDumped;
-        manifest.push_back({key, std::to_string(n), "1", "TLUT"});
+        manifest.push_back({key, std::to_string(n), "1", "TLUT", "-"});
     }
     std::printf("  ek textures: %d dumped, %d skipped, %d failed (of %zu)\n", ekDumped, ekSkipped,
                 ekFailed, ekTex.size() + ekPal.size());
 
     writeManifest(joinPath(outDir, "manifest.tsv"),
-                  "key\tnative_w\tnative_h\tn64_fmt   (one row per dumped texture)", manifest);
+                  "key\tnative_w\tnative_h\tn64_fmt\tpalette_key   (one row per dumped texture; "
+                  "palette_key = TLUT swatch key for CI4/CI8, - otherwise)", manifest);
 
     res.dumped += ekDumped;
     res.skipped += ekSkipped;
